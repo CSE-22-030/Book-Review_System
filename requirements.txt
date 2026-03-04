@@ -1,0 +1,15 @@
+streamlit
+flask
+pdfplumber
+PyPDF2
+python-docx
+nltk
+spacy
+scikit-learn
+sentence-transformers
+pandas
+numpy
+matplotlib
+seaborn
+python-dotenv
+openai
