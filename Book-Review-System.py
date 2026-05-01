@@ -1,197 +1,100 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import os
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(page_title="Book Recommendation System", layout="wide")
-
 st.title("📚 AI Book Recommendation System")
 
 # -----------------------------
-# Load Data (Robust + Smart)
+# Load Data
 # -----------------------------
-
 @st.cache_data
 def load_data():
     books = pd.read_csv("Books.csv")
 
-    # Clean columns
-    books.columns = books.columns.str.strip().str.lower()
-
-    # Rename to standard format
-    books.rename(columns={
-        'isbn': 'book_id',
-        'book-title': 'title',
-        'book-author': 'author',
-        'image-url-m': 'image_url'
-    }, inplace=True)
-
-    books = books[['book_id', 'title', 'author', 'image_url']]
-    books = books.drop_duplicates('title')
-
-    # Reduce size for speed
-    books = books.head(10000)
-
-    # -----------------------------
-    # Create realistic ratings
-    # -----------------------------
-    if not os.path.exists("ratings.csv"):
-
-        data = []
-
-        for user in range(1, 101):
-            liked_books = np.random.choice(books['book_id'], 20)
-
-            for book in liked_books:
-                data.append([user, book, np.random.randint(3, 6)])
-
-            random_books = np.random.choice(books['book_id'], 10)
-            for book in random_books:
-                data.append([user, book, np.random.randint(1, 3)])
-
-        ratings = pd.DataFrame(data, columns=["user_id", "book_id", "rating"])
-        ratings.to_csv("ratings.csv", index=False)
-
-    else:
-        ratings = pd.read_csv("ratings.csv")
-
-    return books, ratings
-
-
-books, ratings = load_data()
-
-# -----------------------------
-# Create Recommendation Matrix
-# -----------------------------
-
-@st.cache_data
-def create_matrix(books, ratings):
-
-    book_ratings = ratings.merge(books, on="book_id")
-    book_ratings = book_ratings.drop_duplicates(subset=["user_id", "title"])
-
-    user_book_matrix = book_ratings.pivot_table(
-        index="title",
-        columns="user_id",
-        values="rating"
-    ).fillna(0)
-
-    # Safe filtering
-    book_counts = book_ratings.groupby('title')['rating'].count()
-    popular_books = book_counts[book_counts > 2].index
-
-    if len(popular_books) == 0:
-        popular_books = book_counts.index
-
-    user_book_matrix = user_book_matrix.loc[
-        user_book_matrix.index.intersection(popular_books)
-    ]
-
-    # Final safety
-    if user_book_matrix.shape[0] == 0:
-        return pd.DataFrame()
-
-    similarity = cosine_similarity(user_book_matrix)
-
-    similarity_df = pd.DataFrame(
-        similarity,
-        index=user_book_matrix.index,
-        columns=user_book_matrix.index
+    books.columns = (
+        books.columns
+        .str.strip()
+        .str.lower()
+        .str.replace('-', '_')
+        .str.replace(' ', '_')
     )
 
-    return similarity_df
+    def find_col(names):
+        for n in names:
+            if n in books.columns:
+                return n
+        return None
+
+    book_id = find_col(['isbn', 'book_id'])
+    title = find_col(['book_title', 'title'])
+    author = find_col(['book_author', 'author'])
+    image = find_col(['image_url_m', 'image_url_l', 'image_url'])
+
+    if not book_id or not title or not author:
+        st.error(f"Columns found: {books.columns.tolist()}")
+        st.stop()
+
+    df = pd.DataFrame({
+        "book_id": books[book_id],
+        "title": books[title],
+        "author": books[author],
+        "image_url": books[image] if image else None
+    })
+
+    df = df.dropna(subset=['title']).drop_duplicates('title').head(10000)
+
+    return df
 
 
-with st.spinner("🔄 Building recommendation engine..."):
-    similarity_df = create_matrix(books, ratings)
+books = load_data()
 
 # -----------------------------
-# Recommendation Function
+# Content-based Recommendation
 # -----------------------------
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-
 @st.cache_data
-def content_based_recommendation(books):
-    books['features'] = books['title'] + " " + books['author']
+def build_model(df):
+    df_copy = df.copy()
+    df_copy["features"] = df_copy["title"] + " " + df_copy["author"]
 
     tfidf = TfidfVectorizer(stop_words='english')
-    tfidf_matrix = tfidf.fit_transform(books['features'])
+    matrix = tfidf.fit_transform(df_copy["features"])
 
-    similarity = cosine_similarity(tfidf_matrix)
+    similarity = cosine_similarity(matrix)
 
-    similarity_df = pd.DataFrame(
-        similarity,
-        index=books['title'],
-        columns=books['title']
-    )
+    return pd.DataFrame(similarity, index=df_copy["title"], columns=df_copy["title"])
 
-    return similarity_df
-content_sim_df = content_based_recommendation(books)
 
-def recommend(book_name):
+similarity_df = build_model(books)
 
-    # 1️⃣ Try collaborative filtering
-    if not similarity_df.empty and book_name in similarity_df.index:
-        similar_scores = similarity_df[book_name].sort_values(ascending=False)[1:6]
-        if len(similar_scores) > 0:
-            return similar_scores.index.tolist()
+def recommend(book):
+    if book in similarity_df.index:
+        return similarity_df[book].sort_values(ascending=False)[1:6].index.tolist()
+    return books['title'].sample(5).tolist()
 
-    # 2️⃣ Fallback → content-based (SMART FIX)
-    if book_name in content_sim_df.index:
-        similar_scores = content_sim_df[book_name].sort_values(ascending=False)[1:6]
-        return similar_scores.index.tolist()
-
-    # 3️⃣ Final fallback → random
-    return books['title'].sample(5).values
-# -----------------------------
-# UI - Book Selection
-# -----------------------------
-
-book_list = sorted(books['title'].dropna().unique())
-
-selected_book = st.selectbox(
-    "🔎 Search a book",
-    book_list
-)
 
 # -----------------------------
-# Show Recommendations
+# UI
 # -----------------------------
+book_list = sorted(books['title'].unique())
+selected = st.selectbox("🔎 Search a book", book_list)
 
 if st.button("Recommend"):
-
-    recommended_books = recommend(selected_book)
-
-    st.write("Recommended books:", recommended_books)  # remove later
-
-    if not recommended_books:
-        st.warning("⚠️ No strong matches found → showing popular books instead")
-
-        recommended_books = books['title'].sample(5).values
+    recs = recommend(selected)
 
     st.subheader("📖 Recommended Books")
 
     cols = st.columns(5)
 
-    num_cols = 5
+    for i, book in enumerate(recs):
+        data = books[books['title'] == book].iloc[0]
 
-    for i in range(0, len(recommended_books), num_cols):
-        cols = st.columns(num_cols)
+        with cols[i % 5]:
+            if pd.notna(data['image_url']):
+                st.image(data['image_url'], width=120)
+            else:
+                st.write("📘 No Image")
 
-        for j in range(num_cols):
-            if i + j < len(recommended_books):
-
-                book = recommended_books[i + j]
-                book_data = books[books['title'] == book].iloc[0]
-
-                with cols[j]:
-
-                    if 'image_url' in book_data and pd.notna(book_data['image_url']):
-                        st.image(book_data['image_url'], width=140)
-                    else:
-                        st.write("📘 No Image")
-
-                    st.write(book)
-                    st.caption(book_data['author'])
+            st.write(book)
+            st.caption(data['author'])
